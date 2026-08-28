@@ -12,11 +12,14 @@ See [AGENTS.md](AGENTS.md) for the full functional spec and implementation
 plan, and [ARCHITECTURE.md](ARCHITECTURE.md) for the module layout, config
 schema, and DB row layout.
 
-**Status:** step 4 of the implementation plan. The config schema, shared
+**Status:** step 5 of the implementation plan. The config schema, shared
 data models, and every module's function/method stubs (docstrings only,
 bodies raise `NotImplementedError`) are in place per `ARCHITECTURE.md`.
-`src/main.py` is still a placeholder and no sensor, DB, or API
-functionality is implemented yet.
+`src/main.py` now implements full process lifecycle management (config
+load/bootstrap, subsystem startup order, background tasks, signal-handled
+shutdown) wired against those stubs, so running it fails predictably at
+the first unimplemented stub rather than on a wiring bug. No sensor, DB,
+or API functionality is implemented yet — that starts in later steps.
 
 ## Prerequisites
 
