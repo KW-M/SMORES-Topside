@@ -8,7 +8,7 @@ The backend should broadly do 3 things, each as its own Python module:
   - Structure this module into roughly 3 files:
     1. A high-level management API with functions to scan all buses, save sensor placement per bus, and query all sensors.
     2. A Modbus wrapper per RS485-to-USB converter that blocks asynchronous requests until the previous response is received, since RS485 is half-duplex. Use a Python Modbus library that supports asyncio with serial connections.
-    3. A simple wrapper class around a Blue RDO sensor with calls to read individual registers by human-readable name (e.g., `read_dissolved_o2_percent`, `read_serial_num`), given a Modbus interface and sensor address, based on `./Documentation/RDO-Blue-Manual-Modbus-Interface.md` (note that this doc is for a interfacing with a PLC, which we are not using, but the interface is the same).
+    3. A simple wrapper class around a Blue RDO sensor with calls to read individual registers by human-readable name (e.g., `read_dissolved_o2_percent`, `read_serial_num`), given a Modbus interface and sensor address, based on `./documentation/RDO-Blue-Manual-Modbus-Interface.md` (note that this doc is for a interfacing with a PLC, which we are not using, but the interface is the same).
 
 * **Save current sensor values to a SQLite DB** at a regular interval (set in the config file): temperature, % dissolved O2, partial pressure, mg/L, and status number/data quality/error code(s) as a human-readable string, plus the current UTC timestamp and a monotonically incrementing row index/counter. Unreadable sensor values should use a named constant `-9999` in the DB.
 
@@ -77,7 +77,7 @@ The backend should broadly do 3 things, each as its own Python module:
 
 Do not proceed to the next step until the user replies with an explicit approval keyword (e.g., "approved"). Each step's output should be a single reviewable diff/PR-sized change.
 
-1. Basic Python project scaffold + dependency file(s) + venv usage guide.
+1. Basic Python project scaffold + dependency file(s) using pipenv + README.md including usage guide / shell commands to install deps, and run the (future) main.py file manually.
 2. Write `ARCHITECTURE.md` with an explicit module tree, for what & where each external libraries will be used, config options and defaults, and a specific description of the DB data row layout. (Pause for review.)
 3. Write config schema and shared data models.
 4. Write function/method stubs with docstrings (no implementation) for all modules.

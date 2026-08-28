@@ -1,0 +1,25 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[packages]
+pymodbus = ">=3.6"
+pyserial-asyncio = "*"
+aiosqlite = "*"
+pydantic = ">=2,<3"
+aiohttp = "*"
+aiohttp-apispec = "*"
+marshmallow = "*"
+psutil = "*"
+
+[dev-packages]
+pytest = "*"
+pytest-asyncio = "*"
+pytest-aiohttp = "*"
+freezegun = "*"
+mypy = "*"
+ruff = "*"
+
+[requires]
+python_version = "3.13"
