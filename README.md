@@ -12,10 +12,11 @@ See [AGENTS.md](AGENTS.md) for the full functional spec and implementation
 plan, and [ARCHITECTURE.md](ARCHITECTURE.md) for the module layout, config
 schema, and DB row layout.
 
-**Status:** step 3 of the implementation plan. The config schema
-(`src/config/schema.py`) and shared data models (`src/models/readings.py`)
-are implemented; `src/main.py` is still a placeholder and no sensor, DB, or
-API functionality exists yet.
+**Status:** step 4 of the implementation plan. The config schema, shared
+data models, and every module's function/method stubs (docstrings only,
+bodies raise `NotImplementedError`) are in place per `ARCHITECTURE.md`.
+`src/main.py` is still a placeholder and no sensor, DB, or API
+functionality is implemented yet.
 
 ## Prerequisites
 
@@ -44,7 +45,7 @@ location under `~/.local/share/virtualenvs/`) and installs both runtime and
 development dependencies pinned in `Pipfile.lock`.
 
 Runtime dependencies: `pymodbus`, `pyserial-asyncio`, `aiosqlite`,
-`pydantic`, `aiohttp`, `aiohttp-apispec`, `marshmallow`, `psutil`.
+`pydantic`, `aiohttp`, `aiohttp-apigami`, `marshmallow`, `psutil`.
 
 Dev/test dependencies: `pytest`, `pytest-asyncio`, `pytest-aiohttp`,
 `freezegun`, `mypy`, `ruff`.
@@ -90,10 +91,27 @@ pipenv shell
 ```
 src/                    Application source (Python package, imported as top-level modules)
   main.py               Entry point (placeholder for now)
+  constants.py          UNREADABLE_VALUE + shared exception classes
+  sampler.py            Periodic sensor-poll-to-DB task (stub)
   config/
     schema.py           Config pydantic model (typed schema, defaults, validation)
+    loader.py           load_config/save_config (stub)
   models/
     readings.py         SensorReading, ScanResult pydantic models (shared DB/API/hardware shape)
+  hardware/              Blue RDO sensor array subsystem (stubs)
+    rdo_blue_constants.py  Register map transcribed from the vendor doc
+    rdo_blue_interface.py  BlueRDOInterface abstract base
+    rdo_blue.py            BlueRDOSensor (real implementation)
+    modbus_bus.py          ModbusBus (per RS485-to-USB converter)
+    manager.py             SensorManager (scan/query high-level API)
+  db/                    SQLite storage subsystem (stubs)
+    database.py            Database CRUD
+    retention.py           Disk-space-based pruning policy
+  api/                   REST/JSON HTTP API subsystem (stubs)
+    app.py                 aiohttp Application factory
+    middleware.py          Concurrency limit + per-route timeout middleware
+    routes.py              Endpoint handlers
+    schemas.py             marshmallow schemas for aiohttp-apigami
 tests/                  Unit and integration tests (mocked sensors + real SQLite/HTTP)
 documentation/          Vendor docs (Blue RDO Modbus register map, etc.)
 Pipfile / Pipfile.lock  Dependency manifest (pipenv)

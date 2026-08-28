@@ -67,17 +67,18 @@ src/                             Python package (root), imported as top-level mo
   api/
     __init__.py
     app.py                       aiohttp Application factory: registers routes,
-                                  installs middleware, wires aiohttp-apispec
+                                  installs middleware, wires aiohttp-apigami
                                   (setup_aiohttp_apispec, swagger UI at /api/docs)
     middleware.py                @web.middleware concurrency_limit_middleware
                                   (asyncio.Semaphore(5), 503 + Retry-After when full)
                                   and timeout_middleware (504 on per-route timeout)
     routes.py                    Handlers for all endpoints in §6
-    schemas.py                   marshmallow schemas for aiohttp-apispec request/
+    schemas.py                   marshmallow schemas for aiohttp-apigami request/
                                   response docs (see §4 note on two schema systems)
 
 documentation/
   RDO-Blue-Manual-Modbus-Interface.md   (existing vendor doc)
+  aiohttp-apigami.README.md             (existing vendor doc)
 
 tests/
   __init__.py
@@ -129,8 +130,8 @@ Rationale for a few naming choices:
 | psutil                  | `db/retention.py`                             | `psutil.disk_usage()` for free-space checks                         |
 | pydantic (v2)           | `config/schema.py`, `models/readings.py`      | Typed config schema + validation; shared reading/scan-result models |
 | aiohttp                 | `api/app.py`, `api/routes.py`, `api/middleware.py`, `main.py` | HTTP server, routing, middleware, `AppRunner` lifecycle   |
-| aiohttp-apispec         | `api/app.py`, `api/routes.py`                 | `@docs`/`@request_schema`/`@response_schema` decorators, Swagger UI at `/api/docs` |
-| marshmallow             | `api/schemas.py`                              | Schema classes consumed by aiohttp-apispec (see note below)          |
+| aiohttp-apigami         | `api/app.py`, `api/routes.py`                 | `@docs`/`@request_schema`/`@response_schema` decorators, Swagger UI at `/api/docs` (maintained `aiohttp-apispec` fork, py3.13-compatible) |
+| marshmallow             | `api/schemas.py`                              | Schema classes consumed by aiohttp-apigami (see note below)          |
 | pytest / pytest-asyncio / pytest-aiohttp | `tests/`                    | Async test runner, `aiohttp_client` fixture for integration tests    |
 | freezegun               | `tests/unit/test_retention.py`, `tests/integration/test_sampler_to_db.py` | Deterministic control of `sample_interval_seconds` timing checks |
 
@@ -138,7 +139,7 @@ Rationale for a few naming choices:
 `models/readings.py` use **pydantic**, the single source of truth for
 config validation and the reading/scan-result shape used internally and
 for DB rows. `api/schemas.py` uses **marshmallow**, because
-aiohttp-apispec's `@request_schema`/`@response_schema` decorators and
+aiohttp-apigami's `@request_schema`/`@response_schema` decorators and
 Swagger generation require marshmallow schema classes. The marshmallow
 schemas in `api/schemas.py` mirror the pydantic models field-for-field
 purely for request validation and doc generation at the HTTP boundary;
@@ -343,7 +344,7 @@ at `GET /api/docs`.
 | Route                     | Method | Handler                | Timeout source                     |
 | -------------------------- | ------ | ------------------------ | ------------------------------------ |
 | `/`                        | GET    | `index`                  | `api_request_timeout_seconds`        |
-| `/api/docs`                | GET    | (aiohttp-apispec/swagger, auto-registered) | —            |
+| `/api/docs`                | GET    | (aiohttp-apigami/swagger, auto-registered) | —            |
 | `/api/sensors/current`     | GET    | `get_current_readings`   | `poll_timeout_seconds` (override)    |
 | `/api/data`                | GET    | `get_data`                | `api_request_timeout_seconds`        |
 | `/api/data/csv`            | GET    | `get_data_csv`            | `api_request_timeout_seconds`        |

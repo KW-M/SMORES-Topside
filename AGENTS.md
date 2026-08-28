@@ -12,10 +12,10 @@ The backend should broadly do 3 things, each as its own Python module:
 
 * **Save current sensor values to a SQLite DB** at a regular interval (set in the config file): temperature, % dissolved O2, partial pressure, mg/L, and status number/data quality/error code(s) as a human-readable string, plus the current UTC timestamp and a monotonically incrementing row index/counter. Unreadable sensor values should use a named constant `-9999` in the DB.
 
-* **Serve a REST-style HTTP/TCP API** returning JSON (unless otherwise specified), using aiohttp with aiohttp-apispec for documentation:
+* **Serve a REST-style HTTP/TCP API** returning JSON (unless otherwise specified), using aiohttp with aiohttp-apigami for documentation:
 
   * `GET /` — basic HTML page describing the system, linking to the API docs.
-  * `GET /api/docs` — Swagger-style API docs via aiohttp-apispec.
+  * `GET /api/docs` — Swagger-style API docs via aiohttp-apigami.
   * `GET /api/sensors/current` — triggers a fresh, lock-guarded poll of all configured sensors (does NOT write a DB row); returns a JSON list of per-sensor readings using the same schema as stored rows, including `-9999`/error status for unreachable sensors. Must complete within `config.poll_timeout_seconds` or return 504.
   * `GET /api/data` — saved data between optional `start`/`end` UTC unix timestamps (both inclusive) as JSON.
   * `GET /api/data/csv` — same as above, but CSV-formatted. If no range is given, returns all data.
@@ -58,6 +58,7 @@ The backend should broadly do 3 things, each as its own Python module:
 - For integration tests, allow the data directory to be set via environment variables, so tests use a separate DB/config without touching the main ones.
 - Add a small shared `constants.py` with global constants and exceptions (`SensorTimeoutError`, `SensorReadError`, `BusScanError`, `ConfigValidationError`), so hardware, DB, and API layers translate failures consistently (hardware failure → `-9999` + status text; API failure → structured JSON error + correct HTTP code) instead of ad hoc try/except per module.
 - All public functions should have type hints; run mypy/ruff before declaring any step complete.
+- There is documentation for aiohttp-apigami at ./documentation/aiohttp-apigami.README.md
 
 ## Recommended External Libraries
 
@@ -68,7 +69,7 @@ The backend should broadly do 3 things, each as its own Python module:
 | Async SQLite            | aiosqlite                                         | Non-blocking DB access in the event loop                     |
 | Config/model validation | pydantic (v2)                                     | Typed config schema, parsing, validation, defaults           |
 | HTTP server             | aiohttp                                           | (already specified)                                          |
-| API docs/schema         | aiohttp-apispec + marshmallow                     | (already specified; marshmallow is its schema dep)           |
+| API docs/schema         | aiohttp-apigami + marshmallow                     | Maintained aiohttp-apispec fork (py3.13-compatible); marshmallow is its schema dep |
 | Disk space checks       | psutil                                            | Cross-platform free-space querying for retention policy      |
 | Testing                 | pytest, pytest-asyncio, pytest-aiohttp, freezegun | Async test support, deterministic time-based test control    |
 | Logging                 | stdlib logging to stdout                          | systemd/journald already captures stdout — no file rotation needed |

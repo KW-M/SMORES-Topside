@@ -9,7 +9,7 @@ pyserial-asyncio = "*"
 aiosqlite = "*"
 pydantic = ">=2,<3"
 aiohttp = "*"
-aiohttp-apispec = "*"
+aiohttp-apigami = "*"
 marshmallow = "*"
 psutil = "*"
 
