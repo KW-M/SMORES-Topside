@@ -140,7 +140,7 @@ async def run() -> None:
             name="retention",
         )
 
-        app = create_app(config, manager, database)
+        app = create_app(config, manager, database, data_dir)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, config.api_host, config.api_port)

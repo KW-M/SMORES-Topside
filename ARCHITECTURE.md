@@ -242,11 +242,16 @@ Example `config.json`:
   failing a second caller.
 - **API concurrency cap:** `api/middleware.py`'s
   `concurrency_limit_middleware` uses an `asyncio.Semaphore(config.api_max_concurrent_clients)`.
-  Acquisition is non-blocking (`asyncio.wait_for(sem.acquire(), timeout=0)`):
-  if the semaphore has no capacity *right now*, the middleware immediately
+  Acquisition is non-blocking: the middleware checks the semaphore's free
+  count before calling `acquire()` and, if none is free, immediately
   returns `503` with a `Retry-After` header rather than queuing the
-  request. This satisfies "rather than being silently dropped or queued
-  indefinitely."
+  request. (`asyncio.wait_for(sem.acquire(), timeout=0)` looks like the
+  obvious way to write a non-blocking try-acquire but is actually always a
+  timeout — `wait_for` wraps the coroutine in a fresh `Task`, which can
+  never be `done()` before its first event-loop iteration, so the
+  `timeout <= 0` fast path cancels it before it runs even when the
+  semaphore has free capacity; caught by the step-6 smoke test.) This
+  satisfies "rather than being silently dropped or queued indefinitely."
 - **Per-route timeout:** `timeout_middleware` wraps the handler call in
   `asyncio.wait_for(handler(request), timeout=route_timeout)`, returning
   `504` on `TimeoutError`. `route_timeout` defaults to
