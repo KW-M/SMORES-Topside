@@ -9,12 +9,13 @@ Target platform: 64-bit Debian (Raspberry Pi OS "trixie") on a Raspberry Pi
 3B+, Python 3.13.
 
 See [AGENTS.md](AGENTS.md) for the full functional spec and implementation
-plan, and `ARCHITECTURE.md` (added in a later step) for the module layout
-once it exists.
+plan, and [ARCHITECTURE.md](ARCHITECTURE.md) for the module layout, config
+schema, and DB row layout.
 
-**Status:** step 1 of the implementation plan — project scaffold and
-dependencies only. `src/main.py` is a placeholder; no sensor, DB, or API
-functionality is implemented yet.
+**Status:** step 3 of the implementation plan. The config schema
+(`src/config/schema.py`) and shared data models (`src/models/readings.py`)
+are implemented; `src/main.py` is still a placeholder and no sensor, DB, or
+API functionality exists yet.
 
 ## Prerequisites
 
@@ -67,7 +68,10 @@ Run tests:
 pipenv run pytest
 ```
 
-Lint and type-check:
+Lint and type-check (settings for both live in `pyproject.toml`, including
+`mypy_path`/`explicit_package_bases` so intra-`src` imports resolve as the
+top-level modules they're written as, e.g. `config.schema` not
+`src.config.schema`):
 
 ```bash
 pipenv run ruff check .
@@ -84,10 +88,16 @@ pipenv shell
 ## Project layout
 
 ```
-src/                  Application source (Python package)
-  main.py             Entry point (placeholder for now)
-tests/                Unit and integration tests (mocked sensors + real SQLite/HTTP)
-documentation/         Vendor docs (Blue RDO Modbus register map, etc.)
-Pipfile / Pipfile.lock Dependency manifest (pipenv)
-AGENTS.md              Functional spec and implementation plan for this project
+src/                    Application source (Python package, imported as top-level modules)
+  main.py               Entry point (placeholder for now)
+  config/
+    schema.py           Config pydantic model (typed schema, defaults, validation)
+  models/
+    readings.py         SensorReading, ScanResult pydantic models (shared DB/API/hardware shape)
+tests/                  Unit and integration tests (mocked sensors + real SQLite/HTTP)
+documentation/          Vendor docs (Blue RDO Modbus register map, etc.)
+Pipfile / Pipfile.lock  Dependency manifest (pipenv)
+pyproject.toml          ruff/mypy configuration
+AGENTS.md               Functional spec and implementation plan for this project
+ARCHITECTURE.md         Module tree, config schema, and DB row layout
 ```
