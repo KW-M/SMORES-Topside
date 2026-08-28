@@ -20,6 +20,7 @@ pytest-aiohttp = "*"
 freezegun = "*"
 mypy = "*"
 ruff = "*"
+types-psutil = "*"
 
 [requires]
 python_version = "3.13"

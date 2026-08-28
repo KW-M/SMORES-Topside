@@ -267,6 +267,7 @@ async def put_config(request: web.Request) -> web.Response:
         return _error_response(500, "Internal configuration error", str(exc))
 
     logger.info("Config replaced via PUT /api/config; sending SIGTERM to restart")
+    logging.shutdown()
     os.kill(os.getpid(), signal.SIGTERM)
 
     return web.json_response(ConfigSchema().dump(new_config.model_dump()))

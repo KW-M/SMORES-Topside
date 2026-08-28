@@ -5,9 +5,17 @@ alongside `sampler.run_forever`). Pure policy over `db.database.Database`
 and `psutil`; no DB schema/query logic lives here.
 """
 
+import asyncio
+import logging
 from pathlib import Path
 
+import psutil
+
 from db.database import Database
+
+logger = logging.getLogger(__name__)
+
+_BYTES_PER_MB = 1024 * 1024
 
 
 async def prune_if_needed(
@@ -26,7 +34,29 @@ async def prune_if_needed(
         Total number of rows deleted during this pass (0 if free space was
         already sufficient).
     """
-    raise NotImplementedError
+    min_free_bytes = min_free_disk_space_mb * _BYTES_PER_MB
+    total_deleted = 0
+    while psutil.disk_usage(str(data_dir)).free < min_free_bytes:
+        deleted = await database.delete_oldest(delete_batch_size)
+        if deleted == 0:
+            remaining = await database.count_rows()
+            logger.warning(
+                "Free disk space below %d MB but sensor_readings has %d rows "
+                "left to delete; cannot free more space by pruning",
+                min_free_disk_space_mb,
+                remaining,
+            )
+            break
+
+        await database.incremental_vacuum(delete_batch_size)
+        total_deleted += deleted
+        logger.info(
+            "Retention: deleted %d rows (%d total this pass) to recover disk space",
+            deleted,
+            total_deleted,
+        )
+
+    return total_deleted
 
 
 async def run_forever(
@@ -40,4 +70,18 @@ async def run_forever(
     `check_interval_seconds`. Runs until cancelled; intended to be wrapped
     in an `asyncio.Task` by `main.py` and cancelled on shutdown.
     """
-    raise NotImplementedError
+    loop = asyncio.get_running_loop()
+    next_run = loop.time()
+    while True:
+        next_run += check_interval_seconds
+        await asyncio.sleep(max(0.0, next_run - loop.time()))
+        try:
+            deleted = await prune_if_needed(
+                database, data_dir, min_free_disk_space_mb, delete_batch_size
+            )
+            if deleted:
+                logger.info("Retention pass complete: %d rows deleted total", deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Retention pass failed")
