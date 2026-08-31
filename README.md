@@ -12,14 +12,9 @@ See [AGENTS.md](AGENTS.md) for the full functional spec and implementation
 plan, and [ARCHITECTURE.md](ARCHITECTURE.md) for the module layout, config
 schema, and DB row layout.
 
-**Status:** step 9 of the implementation plan. `src/main.py` implements full
-process lifecycle management; the config schema, shared data models, REST
-API (routes/schemas/middleware/apispec docs), SQLite storage + retention,
-and the whole `hardware/` layer (Modbus RTU wrapper, Blue RDO sensor class,
-sensor manager) are fully implemented. `config/loader.py` and `sampler.py`
-remain stubs (docstrings only, bodies raise `NotImplementedError`) — that's
-step 10, and the 16 currently-failing tests all fail on one of those two
-stubs by design.
+**Status:** step 11 of the implementation plan — every module is
+implemented and the full test suite passes (`ruff`/`mypy --strict` clean).
+Remaining: step 12, the systemd unit and install/operate instructions.
 
 ## Prerequisites
 
@@ -55,14 +50,41 @@ Dev/test dependencies: `pytest`, `pytest-asyncio`, `pytest-aiohttp`,
 
 ## Running
 
-Run the backend manually (once implemented) with:
+Run the backend manually with:
 
 ```bash
 pipenv run python src/main.py
 ```
 
-Config file and SQLite database live under `~/SMORES_Data` (created
-automatically by the app once the config module is implemented).
+Config file (`config.json`) and SQLite database (`smores.db`) live under
+`~/SMORES_Data`, created automatically on first run — the config file is
+written out with schema defaults if it doesn't exist yet. Set
+`SMORES_DATA_DIR` to use a different directory (the integration tests do
+this to keep off the real one).
+
+Stop it with Ctrl-C or `SIGTERM`; both run the same graceful shutdown, which
+is also what `PUT /api/config` triggers so the process comes back up under
+the new config.
+
+### The API is up before the sensors are
+
+The HTTP listener starts *first*, and opening the serial ports and
+establishing the sensor mapping (a bus scan, if `scan_on_startup` is set)
+happens in the background — a full-range scan takes minutes (see below), and
+the backend answering during it is more useful than a refused connection.
+While the mapping is still being built, `GET /api/sensors/current` and
+`GET /api/data` behave differently on purpose:
+
+- `/api/sensors/current` returns `503` with `{"error": "Bus scan in
+  progress", ...}` — there is nothing to poll yet.
+- `/api/data` works immediately: it reads the database, which is open before
+  the listener starts.
+
+If sensor startup fails outright (e.g. a `/dev/serial/by-id/...` path that
+isn't plugged in), the process does **not** exit — that would just restart-
+loop under systemd. It logs the failure, keeps serving that same `503`, and
+waits for you to fix `serial_port_devices` with `PUT /api/config` or retry
+with `GET /api/scan`.
 
 ### Bus scans take as long as the address range you give them
 
@@ -99,7 +121,7 @@ top-level modules they're written as, e.g. `config.schema` not
 
 ```bash
 pipenv run ruff check .
-pipenv run mypy src
+pipenv run mypy src tests
 ```
 
 Or activate the virtualenv directly instead of prefixing every command with
@@ -113,12 +135,12 @@ pipenv shell
 
 ```
 src/                    Application source (Python package, imported as top-level modules)
-  main.py               Entry point (placeholder for now)
+  main.py               Entry point: config load, subsystem lifecycle, signal handlers
   constants.py          UNREADABLE_VALUE + shared exception classes
-  sampler.py            Periodic sensor-poll-to-DB task (stub; step 10)
+  sampler.py            Periodic sensor-poll-to-DB task (drift-corrected loop)
   config/
     schema.py           Config pydantic model (typed schema, defaults, validation)
-    loader.py           load_config/save_config (stub; step 10)
+    loader.py           load_config/save_config (atomic write via temp file + os.replace)
   models/
     readings.py         SensorReading, ScanResult pydantic models (shared DB/API/hardware shape)
   hardware/              Blue RDO sensor array subsystem (implemented)
@@ -140,7 +162,9 @@ tests/                  Unit and integration tests (mocked sensors + real SQLite
   mocks/mock_rdo_blue.py  Configurable fake BlueRDOInterface (canned values,
                           simulated per-parameter/whole-sensor faults)
   unit/                   Per-module tests
-  integration/            Full aiohttp app + real DB + mocked sensors
+  integration/            Full aiohttp app + real DB + mocked sensors, plus a
+                          test that runs main.run() end to end (real port,
+                          real SIGTERM)
 documentation/          Vendor docs (Blue RDO Modbus register map, etc.)
 Pipfile / Pipfile.lock  Dependency manifest (pipenv)
 pyproject.toml          ruff/mypy configuration

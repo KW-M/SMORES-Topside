@@ -1,9 +1,9 @@
 # SMORES-Topside Architecture
 
-Step 2 deliverable per `AGENTS.md`. This document fixes the module layout,
-config schema, and DB row layout that all later steps (3–12) implement
-against. No application logic exists yet — see `src/main.py` (step 1
-placeholder).
+Originally the step 2 deliverable per `AGENTS.md`: this document fixes the
+module layout, config schema, and DB row layout that the later steps
+implement against, and is kept in sync as they land. Steps 1–11 are
+implemented; step 12 (systemd unit + install/operate instructions) is not.
 
 ## 1. Module tree
 
@@ -107,6 +107,7 @@ tests/
     test_api_sensors_current.py
     test_api_data_endpoints.py
     test_sampler_to_db.py
+    test_main_lifecycle.py
 
 ARCHITECTURE.md                  (this file)
 AGENTS.md / CLAUDE.md            Functional spec (existing)
@@ -439,19 +440,59 @@ in-memory state during the scan it just ran).
 ## 8. Lifecycle (`main.py`)
 
 1. Read `SMORES_DATA_DIR` env var (default `~/SMORES_Data`), ensure it exists.
-2. `config.loader.load_config()`.
-3. Construct `db.database.Database`, run `init_schema()`.
-4. Construct `hardware.manager.SensorManager`; if `scan_on_startup`, run
-   `scan_all_buses()` and persist the result, else load `sensor_mapping`
-   from config as-is.
-5. Start `sampler.py`'s periodic task and `db.retention`'s periodic task
-   as `asyncio.Task`s.
+2. `config.loader.load_config()` (writing schema defaults first on a fresh
+   install), and set the root logger to `config.log_level`.
+3. Construct `db.database.Database` and `hardware.manager.SensorManager`
+   (constructing the manager only builds `ModbusBus` objects; it opens no
+   serial ports).
+4. Register the `SIGTERM`/`SIGINT` handlers, which set a shutdown
+   `asyncio.Event`.
+5. `database.init_schema()`.
 6. Build and start the aiohttp `AppRunner`/`TCPSite`.
-7. Register `SIGTERM`/`SIGINT` handlers that cancel the two background
-   tasks and call `.close()`/`.aclose()` on the manager (closes each
-   `ModbusBus`'s serial connection), the database, and the aiohttp
-   runner, then exit — systemd's `Restart=always` handles restart-on-exit
-   for both normal SIGTERM/SIGINT and the `PUT /api/config` restart path.
+7. Start three `asyncio.Task`s: the sensor bring-up (`manager.start()`,
+   then either `scan_all_buses()` + persist, or `save_sensor_mapping()`
+   from config), `sampler.run_forever`, and `db.retention.run_forever`.
+8. Await the shutdown event; then restore default signal disposition,
+   cancel the three tasks, and `cleanup()`/`aclose()` the runner, manager
+   (closing each `ModbusBus`'s serial connection), and database, in that
+   order — systemd's `Restart=always` handles restart-on-exit for both
+   normal SIGTERM/SIGINT and the `PUT /api/config` restart path.
+
+Three ordering choices are load-bearing:
+
+- **Signal handlers before any subsystem starts** (step 4 before 5), so a
+  `systemctl stop`/`restart` arriving during `init_schema()` or a long
+  startup scan is handled gracefully instead of killing the process
+  mid-write. Teardown then *removes* the handlers, so a second SIGTERM
+  (systemd losing patience) terminates immediately rather than being
+  swallowed by a handler that has already fired.
+- **The listener before the sensors** (step 6 before 7). A full 1-247
+  address-space scan takes minutes (§4), and `main.py` used to await it
+  before binding the port, so for that whole window the backend was simply
+  unreachable. Now the scan runs as a background task and the API is up
+  throughout, answering `503 Bus scan in progress` from
+  `SensorManager`'s guard. That guard distinguishes three states:
+  *scan running* → 503; *mapping never established* (bring-up still
+  opening ports, or it failed outright) → 503; *established but empty*
+  (a scan that found nothing) → `200 []`, which is a real answer, not an
+  error. Without the "never established" case, the reorder would have made
+  a request landing in the gap between step 6 and step 7 report zero
+  sensors instead of "not ready".
+- **Sensor bring-up failures are logged, not fatal.** A missing
+  `/dev/serial/by-id/...` path raises `BusScanError`; exiting on it would
+  put the unit into a systemd restart loop. The API stays up instead, so an
+  operator can fix `serial_port_devices` via `PUT /api/config` or retry
+  with `GET /api/scan`, and every sensor endpoint returns the 503 above in
+  the meantime. `sampler.run_forever` tolerates the same `BusScanError`
+  from `query_all_sensors()` — it logs and skips that tick rather than
+  dying, since it is started before the mapping exists.
+
+Both periodic loops (`sampler.py`, `db/retention.py`) use the
+`next_run += interval; sleep(max(0, next_run - now))` pattern from
+`AGENTS.md`. `sampler.py` adds one thing on top: if a poll overruns its
+interval, it realigns `next_run` to the next future tick and logs a warning
+instead of firing a burst of back-to-back catch-up samples — one sample per
+interval is the intent, not a fixed total count.
 
 ## 9. Testing structure
 
@@ -490,19 +531,12 @@ in-memory state during the scan it just ran).
   `sensor_factory`, covering the scan/mapping logic and the
   exception-to-`-9999` translations the API-level integration tests don't
   reach.
-
-### Step 9 note: `main.py` starts serving only *after* the startup scan
-
-`main.py` currently awaits the startup scan before building the aiohttp
-runner, so during a long startup scan there is no listener to return the
-"scan in progress" 503 that `SensorManager` is now able to raise, and the
-sampler task (still a step-10 stub) will need to tolerate `BusScanError`
-from `query_all_sensors()` for the same reason. Starting the site and the
-signal handlers *before* the startup scan, and running that scan as a
-cancellable task, belongs with step 10's `sampler.py` implementation rather
-than the hardware layer.
-
----
-
-Once this is approved, step 3 implements `config/schema.py` and
-`models/readings.py` against the tables above.
+- `tests/integration/test_main_lifecycle.py` runs `main.run()` itself —
+  real config file, real SQLite DB, real aiohttp listener on a real TCP
+  port, real SIGTERM — patching `hardware.manager`'s `ModbusBus` (a
+  slow-probing fake, so the startup scan lasts long enough to make requests
+  during it) and `BlueRDOSensor` (the shared `MockBlueRDOSensor`). It
+  covers the §8 ordering directly: a client polling during the startup scan
+  gets 503, the *same* client sees readings once the scan lands, the
+  discovered mapping is persisted to `config.json`, and SIGTERM tears
+  everything down without an exception.

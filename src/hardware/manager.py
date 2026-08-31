@@ -96,6 +96,7 @@ class SensorManager:
         }
         self._sensors: dict[int, BlueRDOInterface] = {}
         self._mapping: dict[str, list[int]] = {}
+        self._mapping_established = False
         self._scan_task: asyncio.Task[list[ScanResult]] | None = None
 
     @property
@@ -141,6 +142,7 @@ class SensorManager:
                 logger.exception("In-progress bus scan failed during shutdown")
         self._scan_task = None
         self._sensors = {}
+        self._mapping_established = False
         for bus in self._buses.values():
             await bus.aclose()
 
@@ -226,6 +228,7 @@ class SensorManager:
 
         self._sensors = sensors
         self._mapping = applied
+        self._mapping_established = True
         logger.info(
             "Sensor mapping applied: %d sensor(s) across %d converter(s) (%s)",
             len(sensors),
@@ -275,17 +278,25 @@ class SensorManager:
         return BlueRDOSensor(bus, address, self._config.sensor_read_timeout_seconds)
 
     def _require_mapping(self) -> None:
-        """Guard every query path: while the mapping is still being built by a
-        scan, callers get an informative error instead of a silently empty
-        result (AGENTS.md: "API calls made during scanning should return an
-        informative error"). An established-but-empty mapping is not an error —
-        a system with no sensors found simply has no readings."""
+        """Guard every query path: until the mapping exists, callers get an
+        informative error instead of a silently empty result (AGENTS.md: "API
+        calls made during scanning should return an informative error"). An
+        established-but-empty mapping is not an error — a system with no
+        sensors found simply has no readings."""
         if self._sensors:
             return
         if self.is_scanning:
             raise BusScanError(
                 "bus scan in progress; the sensor mapping is not established yet — "
                 "retry once the scan completes"
+            )
+        if not self._mapping_established:
+            # `main.py` starts serving before it brings the sensors up, so
+            # this covers both "still opening serial ports / about to scan"
+            # and "startup failed and left no mapping behind".
+            raise BusScanError(
+                "the sensor mapping is not established yet; the backend is still "
+                "starting up, or sensor startup failed — check the logs"
             )
         logger.debug("Queried with an empty sensor mapping; returning no readings")
 

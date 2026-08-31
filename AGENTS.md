@@ -89,6 +89,6 @@ Do not proceed to the next step until the user replies with an explicit approval
 9. Implement the hardware layer (registers, RS485 wrapper, BlueRDO class).
 10. Implement remaining stubs.
 11. Run the full test suite.
-12. Write systemd unit + install/operate instructions (including journalctl usage).
+12. Write systemd unit with data path env vars set to `~/SMORES_Data`, user pi. Add instal & operate instructions to README.md (including systemd install & journalctl usage, Where to find live api docs, Basic API query example for CSV in date range, and csv output format example / status code meanings).
 
 **Definition of Done:** all tests pass, ruff/mypy clean, `ARCHITECTURE.md` matches implementation, systemd unit installs, runs without exiting and survives `systemctl restart`.

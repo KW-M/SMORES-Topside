@@ -462,6 +462,24 @@ async def test_query_all_sensors_with_an_empty_mapping_returns_nothing(
     assert await manager.query_all_sensors() == []
 
 
+async def test_query_all_sensors_errors_before_any_mapping_is_established(
+    manager: SensorManager,
+) -> None:
+    """`main.py` starts serving *before* it brings the sensors up, so a query
+    landing in that window (or after sensor startup failed outright) must say
+    the mapping doesn't exist rather than report zero sensors."""
+    with pytest.raises(BusScanError, match="not established"):
+        await manager.query_all_sensors()
+
+
+async def test_aclose_unestablishes_the_mapping(manager: SensorManager) -> None:
+    await manager.save_sensor_mapping({CONVERTER_A: [1]})
+    await manager.aclose()
+
+    with pytest.raises(BusScanError, match="not established"):
+        await manager.query_all_sensors()
+
+
 async def test_query_sensor_reads_one_sensor(manager: SensorManager) -> None:
     await manager.save_sensor_mapping({CONVERTER_A: [1, 2]})
 
