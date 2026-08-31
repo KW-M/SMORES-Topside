@@ -88,7 +88,7 @@ Do not proceed to the next step until the user replies with an explicit approval
 8. Write mocks + unit/integration tests.
 9. Implement the hardware layer (registers, RS485 wrapper, BlueRDO class).
 10. Implement remaining stubs.
-11. Run the full test suite.
-12. Write systemd unit with data path env vars set to `~/SMORES_Data`, user pi. Add instal & operate instructions to README.md (including systemd install & journalctl usage, Where to find live api docs, Basic API query example for CSV in date range, and csv output format example / status code meanings).
+11. Run the full test suite from clean slate in verbose mode - run it 5 times to verify tests leave no leftovers and are not flaky. Also run unit and integration tests separately from a clean slate to verify unit tests don't depend on integration test state and visa versa.
+12. Write systemd unit with data path env vars set to `~/SMORES_Data`, user pi. Add install & operate instructions to README.md (including systemd install & journalctl usage, Where to find live api docs, Basic API query example for CSV in date range, and csv output format example, status code meanings).
 
 **Definition of Done:** all tests pass, ruff/mypy clean, `ARCHITECTURE.md` matches implementation, systemd unit installs, runs without exiting and survives `systemctl restart`.
