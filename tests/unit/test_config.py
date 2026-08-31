@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 import config.loader as loader
+from api.schemas import ConfigSchema
 from config.loader import DATA_DIR_ENV_VAR, get_config_path, get_data_dir, load_config, save_config
 from config.schema import Config
 from constants import ConfigValidationError
@@ -125,3 +126,22 @@ class TestLoadSaveConfig:
         monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
         save_config(Config(api_port=3333))
         assert load_config().api_port == 3333
+
+
+class TestConfigSchemaMatchesApiSchema:
+    """`GET /api/config` is documented as returning the config file's
+    contents, and `PUT /api/config` fills any field the caller omits with a
+    `Config` default — so a field present in `Config` but missing from
+    `api.schemas.ConfigSchema` is silently dropped on GET and then silently
+    reset to its default by a GET-edit-PUT round trip. Keep the two in sync.
+    """
+
+    def test_api_schema_covers_every_config_field(self) -> None:
+        config_fields = set(Config.model_fields)
+        api_fields = set(ConfigSchema().fields)
+        assert config_fields == api_fields
+
+    def test_api_schema_dump_round_trips_a_full_config(self) -> None:
+        original = Config(scan_min_address=2, scan_max_address=27, api_port=9999)
+        dumped = ConfigSchema().dump(original.model_dump())
+        assert Config.model_validate(dumped) == original

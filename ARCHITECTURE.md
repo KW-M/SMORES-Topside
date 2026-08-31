@@ -2,8 +2,8 @@
 
 Originally the step 2 deliverable per `AGENTS.md`: this document fixes the
 module layout, config schema, and DB row layout that the later steps
-implement against, and is kept in sync as they land. Steps 1–11 are
-implemented; step 12 (systemd unit + install/operate instructions) is not.
+implement against, and is kept in sync as they land. All 12 steps are
+implemented.
 
 ## 1. Module tree
 
@@ -79,6 +79,12 @@ src/                             Python package (root), imported as top-level mo
     routes.py                    Handlers for all endpoints in §6
     schemas.py                   marshmallow schemas for aiohttp-apigami request/
                                   response docs (see §4 note on two schema systems)
+
+deploy/
+  smores-topside.service         systemd unit (§10): Type=exec, User=pi,
+                                  SupplementaryGroups=dialout,
+                                  Environment=SMORES_DATA_DIR=/home/pi/SMORES_Data,
+                                  Restart=always, StartLimitIntervalSec=0
 
 documentation/
   RDO-Blue-Manual-Modbus-Interface.md   (existing vendor doc)
@@ -540,3 +546,23 @@ interval is the intent, not a fixed total count.
   gets 503, the *same* client sees readings once the scan lands, the
   discovered mapping is persisted to `config.json`, and SIGTERM tears
   everything down without an exception.
+
+## 10. Deployment (`deploy/smores-topside.service`)
+
+The systemd unit is the only supported way to run the backend unattended.
+Install and operating commands live in `README.md`; the decisions behind the
+unit are here.
+
+| Directive | Value | Why |
+| --- | --- | --- |
+| `Type=exec` | | No readiness protocol (no `sd_notify`); `exec` at least makes `systemctl start` fail if the interpreter path is wrong, which `simple` would not. |
+| `User=pi` / `Group=pi` | | Per `AGENTS.md` step 12. The code and the data directory both live under `/home/pi`. |
+| `SupplementaryGroups=dialout` | | `/dev/ttyUSB*` is group `dialout`. `pi` is normally already a member, so this is belt-and-braces for a re-imaged Pi. |
+| `Environment=SMORES_DATA_DIR=` | `/home/pi/SMORES_Data` | The same path `config.loader.get_data_dir()` would derive from `~`, stated explicitly so the service's data location does not depend on the resolved home directory. `main.py` creates it if absent, so no `StateDirectory=`/`ExecStartPre=mkdir` is needed. |
+| `Environment=PYTHONUNBUFFERED=1` | | Without it, stdout to a pipe (journald) is block-buffered and log lines arrive in 8 KiB batches — useless for watching a scan progress with `journalctl -f`. |
+| `ExecStart=` | `<venv>/bin/python .../src/main.py` | The pipenv virtualenv interpreter directly, not `pipenv run`: no wrapper process between systemd and the signal handlers in §8. The venv directory name is a sha256 digest of the absolute `Pipfile` path, so it is stable across `pipenv install` re-runs but not across moving the repo (README documents re-pointing it via `pipenv --venv`). |
+| `Restart=always` | | **Not** `on-failure`: `PUT /api/config` persists the config and then exits through the normal §8 SIGTERM path, i.e. exit code 0. `on-failure` would leave the service dead after every config change. Restart-looping on a hardware fault is not a risk because §8 deliberately does not exit when sensor startup fails. |
+| `StartLimitIntervalSec=0` | | Disables the default 5-starts-per-10s limit, which `PUT /api/config` (a legitimate, operator-driven restart) could otherwise trip, latching the unit into `failed`. |
+| `KillSignal=SIGTERM`, `TimeoutStopSec=30` | | SIGTERM is what §8's handler waits on; 30 s is well beyond what teardown (cancel tasks, close serial ports, close the DB) needs. §8 removes the handlers once teardown begins, so systemd's follow-up `SIGKILL` — or an impatient operator's second `systemctl stop` — is not swallowed. |
+| `SyslogIdentifier=smores-topside` | | Makes `journalctl -t smores-topside` work alongside `-u`. |
+| `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `RestrictSUIDSGID` | | Cheap hardening that doesn't interfere with the workload. Deliberately **absent**: `PrivateDevices=`/`DeviceAllow=` (the service's entire job is opening USB serial adapters) and `ProtectHome=` (both the code and the data directory are under `/home/pi`). `ProtectSystem=strict` is not used either, since it would make `/run` read-only and put the journald socket at risk. |

@@ -17,6 +17,8 @@ from typing import Any
 
 from marshmallow import EXCLUDE, RAISE, Schema, fields, validate
 
+from constants import MODBUS_MAX_UNIT_ADDRESS, MODBUS_MIN_UNIT_ADDRESS
+
 
 class SensorReadingSchema(Schema):
     """Mirrors `models.readings.SensorReading`. Response body shape for
@@ -147,6 +149,16 @@ class ConfigSchema(Schema):
         load_default=1.0,
         dump_default=1.0,
         validate=validate.Range(min=0, min_inclusive=False),
+    )
+    scan_min_address = fields.Integer(
+        load_default=MODBUS_MIN_UNIT_ADDRESS,
+        dump_default=MODBUS_MIN_UNIT_ADDRESS,
+        validate=validate.Range(min=MODBUS_MIN_UNIT_ADDRESS, max=MODBUS_MAX_UNIT_ADDRESS),
+    )
+    scan_max_address = fields.Integer(
+        load_default=MODBUS_MAX_UNIT_ADDRESS,
+        dump_default=MODBUS_MAX_UNIT_ADDRESS,
+        validate=validate.Range(min=MODBUS_MIN_UNIT_ADDRESS, max=MODBUS_MAX_UNIT_ADDRESS),
     )
     api_host = fields.String(load_default="0.0.0.0", dump_default="0.0.0.0")
     api_port = fields.Integer(
