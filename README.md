@@ -12,14 +12,14 @@ See [AGENTS.md](AGENTS.md) for the full functional spec and implementation
 plan, and [ARCHITECTURE.md](ARCHITECTURE.md) for the module layout, config
 schema, and DB row layout.
 
-**Status:** step 5 of the implementation plan. The config schema, shared
-data models, and every module's function/method stubs (docstrings only,
-bodies raise `NotImplementedError`) are in place per `ARCHITECTURE.md`.
-`src/main.py` now implements full process lifecycle management (config
-load/bootstrap, subsystem startup order, background tasks, signal-handled
-shutdown) wired against those stubs, so running it fails predictably at
-the first unimplemented stub rather than on a wiring bug. No sensor, DB,
-or API functionality is implemented yet — that starts in later steps.
+**Status:** step 9 of the implementation plan. `src/main.py` implements full
+process lifecycle management; the config schema, shared data models, REST
+API (routes/schemas/middleware/apispec docs), SQLite storage + retention,
+and the whole `hardware/` layer (Modbus RTU wrapper, Blue RDO sensor class,
+sensor manager) are fully implemented. `config/loader.py` and `sampler.py`
+remain stubs (docstrings only, bodies raise `NotImplementedError`) — that's
+step 10, and the 16 currently-failing tests all fail on one of those two
+stubs by design.
 
 ## Prerequisites
 
@@ -64,6 +64,26 @@ pipenv run python src/main.py
 Config file and SQLite database live under `~/SMORES_Data` (created
 automatically by the app once the config module is implemented).
 
+### Bus scans take as long as the address range you give them
+
+With `scan_on_startup: true`, startup probes every Modbus address in
+`[scan_min_address, scan_max_address]` on every converter. An address with
+nothing on it can only be ruled out by letting its probe time out, and each
+address is probed up to twice (the first probe doubles as the instrument
+wake-up the vendor doc requires). So the worst case is roughly:
+
+```
+2 x (scan_max_address - scan_min_address + 1) x scan_probe_timeout_seconds
+```
+
+The defaults (`1`-`247`, 1 s) therefore allow up to ~8 minutes. Set
+`scan_max_address` to the highest address actually installed — e.g. `27` for
+a 27-sensor array, which brings the same scan down to under a minute — or
+leave `scan_on_startup: false` and let the saved `sensor_mapping` be used
+as-is, re-scanning on demand with `GET /api/scan`. The startup log states
+the address count and the worst-case estimate, and warns when that estimate
+exceeds a minute.
+
 ## Development
 
 Run tests:
@@ -95,27 +115,32 @@ pipenv shell
 src/                    Application source (Python package, imported as top-level modules)
   main.py               Entry point (placeholder for now)
   constants.py          UNREADABLE_VALUE + shared exception classes
-  sampler.py            Periodic sensor-poll-to-DB task (stub)
+  sampler.py            Periodic sensor-poll-to-DB task (stub; step 10)
   config/
     schema.py           Config pydantic model (typed schema, defaults, validation)
-    loader.py           load_config/save_config (stub)
+    loader.py           load_config/save_config (stub; step 10)
   models/
     readings.py         SensorReading, ScanResult pydantic models (shared DB/API/hardware shape)
-  hardware/              Blue RDO sensor array subsystem (stubs)
+  hardware/              Blue RDO sensor array subsystem (implemented)
     rdo_blue_constants.py  Register map transcribed from the vendor doc
     rdo_blue_interface.py  BlueRDOInterface abstract base
-    rdo_blue.py            BlueRDOSensor (real implementation)
-    modbus_bus.py          ModbusBus (per RS485-to-USB converter)
+    rdo_blue.py            BlueRDOSensor (register decoding, per-parameter status)
+    modbus_bus.py          ModbusBus (per RS485-to-USB converter: half-duplex
+                           request lock, no retries, instrument wake-up)
     manager.py             SensorManager (scan/query high-level API)
-  db/                    SQLite storage subsystem (stubs)
+  db/                    SQLite storage subsystem (implemented)
     database.py            Database CRUD
     retention.py           Disk-space-based pruning policy
-  api/                   REST/JSON HTTP API subsystem (stubs)
+  api/                   REST/JSON HTTP API subsystem (implemented)
     app.py                 aiohttp Application factory
     middleware.py          Concurrency limit + per-route timeout middleware
     routes.py              Endpoint handlers
     schemas.py             marshmallow schemas for aiohttp-apigami
 tests/                  Unit and integration tests (mocked sensors + real SQLite/HTTP)
+  mocks/mock_rdo_blue.py  Configurable fake BlueRDOInterface (canned values,
+                          simulated per-parameter/whole-sensor faults)
+  unit/                   Per-module tests
+  integration/            Full aiohttp app + real DB + mocked sensors
 documentation/          Vendor docs (Blue RDO Modbus register map, etc.)
 Pipfile / Pipfile.lock  Dependency manifest (pipenv)
 pyproject.toml          ruff/mypy configuration

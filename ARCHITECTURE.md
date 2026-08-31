@@ -12,9 +12,10 @@ src/                             Python package (root), imported as top-level mo
   __init__.py
   main.py                        Entry point: asyncio loop, config load, subsystem
                                   lifecycle (start/stop), signal handlers
-  constants.py                   UNREADABLE_VALUE = -9999, exception classes:
-                                  SensorTimeoutError, SensorReadError, BusScanError,
-                                  ConfigValidationError
+  constants.py                   UNREADABLE_VALUE = -9999, the negative internal status
+                                  codes (§5), MODBUS_MIN/MAX_UNIT_ADDRESS, exception
+                                  classes: SensorTimeoutError, SensorReadError,
+                                  BusScanError, ConfigValidationError
   sampler.py                     Periodic sampling task: drift-corrected asyncio.sleep
                                   loop that calls hardware.manager.query_all_sensors()
                                   and db.database.insert_reading() on config.sample_interval_seconds
@@ -45,14 +46,17 @@ src/                             Python package (root), imported as top-level mo
     rdo_blue.py                  BlueRDOSensor(BlueRDOInterface): real implementation,
                                   takes a ModbusBus + integer address
     modbus_bus.py                ModbusBus: one instance per RS485-to-USB converter.
-                                  Wraps pymodbus AsyncModbusSerialClient; serializes
-                                  all requests on the port behind an asyncio.Lock
-                                  (RS485 is half-duplex — a request blocks until its
-                                  response arrives before the next request is sent)
+                                  Wraps pymodbus AsyncModbusSerialClient (retries=0);
+                                  serializes all requests on the port behind an
+                                  asyncio.Lock (RS485 is half-duplex — a request blocks
+                                  until its response arrives before the next request is
+                                  sent), and owns per-address instrument wake-up (§4)
     manager.py                   High-level API: scan_all_buses(), get_sensor_mapping(),
                                   save_sensor_mapping(), query_all_sensors(),
                                   query_sensor(address). Owns the ModbusBus instances
-                                  and the address→(bus, BlueRDOSensor) table.
+                                  and the address→(bus, BlueRDOSensor) table. Takes an
+                                  optional sensor_factory (§9) so tests can substitute
+                                  mocked sensors without a real ModbusBus connection.
 
   db/
     __init__.py
@@ -95,6 +99,7 @@ tests/
     test_models.py
     test_rdo_blue.py
     test_modbus_bus.py
+    test_manager.py
     test_database.py
     test_retention.py
   integration/
@@ -133,7 +138,7 @@ Rationale for a few naming choices:
 | aiohttp-apigami         | `api/app.py`, `api/routes.py`                 | `@docs`/`@request_schema`/`@response_schema` decorators, Swagger UI at `/api/docs` (maintained `aiohttp-apispec` fork, py3.13-compatible) |
 | marshmallow             | `api/schemas.py`                              | Schema classes consumed by aiohttp-apigami (see note below)          |
 | pytest / pytest-asyncio / pytest-aiohttp | `tests/`                    | Async test runner, `aiohttp_client` fixture for integration tests    |
-| freezegun               | `tests/unit/test_retention.py`, `tests/integration/test_sampler_to_db.py` | Deterministic control of `sample_interval_seconds` timing checks |
+| freezegun               | (unused)                    | Listed in `AGENTS.md`'s recommended libraries and `Pipfile`, but the drift-corrected loops in `sampler.py`/`db/retention.py` schedule against `asyncio`'s monotonic loop clock (`loop.time()`), which freezegun does not intercept. Step 8's timing tests instead use short *real* intervals (tens of milliseconds) with a bounded `asyncio.sleep` + cancel, which exercises the actual scheduling code path. |
 
 **Two schema systems, deliberately:** `config/schema.py` and
 `models/readings.py` use **pydantic**, the single source of truth for
@@ -172,6 +177,8 @@ back up with the new config).
 | `modbus_request_timeout_seconds`  | `float`                 | `1.0`                | Per-Modbus-request (single register read) timeout — "serial timeout" |
 | `sensor_read_timeout_seconds`     | `float`                 | `3.0`                | Timeout for one sensor's full multi-register read (`read_all()`) — "sensor timeout" |
 | `scan_probe_timeout_seconds`      | `float`                 | `1.0`                | Timeout probing the modbuss address space of one RS485-to-usb serial converter.                    |
+| `scan_min_address`                | `int`                   | `1`                  | Lowest Modbus address a scan probes (inclusive)                        |
+| `scan_max_address`                | `int`                   | `247`                | Highest Modbus address a scan probes (inclusive). Defaults to the whole legal RTU space; every *absent* address in the range costs a full `scan_probe_timeout_seconds`, twice (§4), so narrowing this to the highest address actually installed is the main lever on scan time |
 | `api_host`                        | `str`                   | `"0.0.0.0"`          | aiohttp bind address                                                   |
 | `api_port`                        | `int`                   | `8080`               | aiohttp bind port                                                      |
 | `api_request_timeout_seconds`     | `float`                 | `10.0`               | Default per-request timeout for most endpoints (504 on expiry)         |
@@ -187,6 +194,12 @@ in `AGENTS.md`'s config bullet list but are required to construct the
 serial client and match the vendor doc's factory defaults (RTU, 19200,
 8E1) — included here for completeness and to keep them out of hardcoded
 logic per the "keep register/config assumptions easy to patch" guidance.
+`scan_min_address`/`scan_max_address` are there for the same reason: the
+spec says to "scan the Modbus address space", and the full legal space is
+the default, but the operator needs a lever on a scan that would otherwise
+take minutes (see §4). Both are validated against
+`constants.MODBUS_MIN_UNIT_ADDRESS`/`MODBUS_MAX_UNIT_ADDRESS`, with
+`scan_min_address <= scan_max_address` enforced by a model validator.
 
 Example `config.json`:
 
@@ -209,6 +222,8 @@ Example `config.json`:
   "modbus_request_timeout_seconds": 1.0,
   "sensor_read_timeout_seconds": 3.0,
   "scan_probe_timeout_seconds": 1.0,
+  "scan_min_address": 1,
+  "scan_max_address": 247,
   "api_host": "0.0.0.0",
   "api_port": 8080,
   "api_request_timeout_seconds": 10.0,
@@ -233,13 +248,52 @@ Example `config.json`:
   gets the correct response for the request it made, because the lock
   scope is exactly one request/response pair and callers await their own
   awaitable.
-- **Scan mutual exclusion:** `hardware/manager.py` holds a single
-  module-level `asyncio.Lock` (or in-progress `asyncio.Task` reference)
-  around `scan_all_buses()`. A scan request arriving while one is already
-  running does not start a second concurrent scan; `AGENTS.md` allows
-  either erroring or waiting on the in-progress result — this project
-  waits on the existing task and returns its result to avoid needlessly
-  failing a second caller.
+- **Instrument wake-up (per address, not per port):** the Blue RDO idles
+  into a low-power state after `END_OF_SESSION_TIMEOUT_SECONDS` (5 s,
+  vendor doc) without traffic, and answers only after "a carriage return
+  (0x0D) or any Modbus command" plus one second to wake. At any
+  `sample_interval_seconds` above 5 s, *every* read would otherwise fail, so
+  `ModbusBus` tracks the last answered command per Modbus address and, when
+  that address's session has lapsed, sends one throwaway Device Id read as
+  the wake-up, waits `WAKEUP_SETTLE_SECONDS`, then issues the real request
+  exactly once. This is not a retry (`AGENTS.md`: "Do not retry reads") —
+  pymodbus is constructed with `retries=0`, so a non-answering instrument
+  still costs exactly one request timeout. The wake-up command is sent
+  under the bus lock; the settle sleep deliberately is **not**, so other
+  addresses keep using the port while one instrument wakes, and a
+  27-sensor poll costs one shared ~1 s settle rather than 27 serial ones.
+  A per-address lock means concurrent readers of the same instrument wake
+  it once between them. Note the timeout interaction: with the defaults an
+  idle-but-healthy sensor's `read_all()` costs ~1.2 s of its 3 s
+  `sensor_read_timeout_seconds` budget (settle plus four reads), while an
+  absent one exhausts the whole budget (wake timeout + settle + first read
+  timeout) and is reported unreachable by `read_all()`'s own timeout rather
+  than by four consecutive per-request ones.
+- **Scan mutual exclusion:** `hardware/manager.py` keeps the in-progress
+  `asyncio.Task` for `scan_all_buses()`. A scan request arriving while one
+  is already running does not start a second concurrent scan; `AGENTS.md`
+  allows either erroring or waiting on the in-progress result — this
+  project awaits the existing task (shielded, so an API client that gives
+  up doesn't cancel a scan the startup path may still be waiting on) and
+  returns its result to avoid needlessly failing a second caller. While a
+  scan is running and no mapping is established yet,
+  `query_all_sensors`/`query_sensor` raise `BusScanError` (→ HTTP 503), per
+  `AGENTS.md`'s "API calls made during scanning should return an
+  informative error". An *established* mapping that happens to be empty is
+  not an error — a system where no sensors were found simply has no
+  readings.
+- **Scan cost (two passes):** an absent Modbus address can only be ruled
+  out by letting its probe time out, and because the first probe of an idle
+  instrument doubles as its wake-up, a non-answer on the first pass is
+  inconclusive. `_scan_one_bus` therefore probes the whole range once, then
+  re-probes only the addresses that didn't answer, after a single
+  `WAKEUP_SETTLE_SECONDS` wait — so a *present* sensor is probed once or
+  twice and an absent address costs two probe timeouts. Buses are scanned
+  concurrently (separate ports), so the worst case is
+  `2 x address_count x scan_probe_timeout_seconds + WAKEUP_SETTLE_SECONDS`
+  regardless of converter count; `hardware.manager.estimate_scan_duration_seconds`
+  computes it, and it is both logged before a scan (with a warning above
+  60 s) and used as the `/api/scan` route timeout.
 - **API concurrency cap:** `api/middleware.py`'s
   `concurrency_limit_middleware` uses an `asyncio.Semaphore(config.api_max_concurrent_clients)`.
   Acquisition is non-blocking: the middleware checks the semaphore's free
@@ -272,7 +326,7 @@ class SensorReading(BaseModel):
     do_partial_pressure_torr: float
     do_mg_l: float
     status_code: int            # worst-case Data Quality ID across the 4 parameters,
-                                 # or a negative internal code for timeout/unreachable
+                                 # or a negative internal code (see below)
     status_text: str            # human-readable, e.g. "OK", "Sensor timeout",
                                  # "temperature: Error reading parameter"
 
@@ -286,6 +340,23 @@ class ScanResult(BaseModel):
 output (via `hardware/manager.py`), the DB row (`db/database.py` maps
 1:1 to/from this model), the JSON body of `/api/sensors/current` and
 `/api/data`, and each CSV row of `/api/data/csv`.
+
+`status_code` is a Blue RDO Data Quality ID (0 = OK, 3, 5, ...) whenever the
+instrument reported one, else one of three negative codes defined in
+`constants.py`. All three pair with `UNREADABLE_VALUE` (-9999) in the
+affected numeric fields:
+
+| Code | Constant                          | Meaning                                                                 |
+| ---- | --------------------------------- | ------------------------------------------------------------------------ |
+| `-1` | `SENSOR_UNREACHABLE_STATUS_CODE`  | `read_all()` raised `SensorTimeoutError` — the instrument never answered; `status_text` is `SENSOR_UNREACHABLE_STATUS_TEXT` ("Sensor timeout") and every value field is -9999 |
+| `-2` | `PARAMETER_TIMEOUT_STATUS_CODE`   | Some (not all) parameter reads timed out while the instrument kept answering others; only those fields are -9999 |
+| `-3` | `SENSOR_READ_ERROR_STATUS_CODE`   | `SensorReadError` — a Modbus exception response or short/malformed reply rather than a Data Quality problem the instrument could describe |
+
+When one read mixes outcomes, `hardware/rdo_blue.py`'s `_severity_rank`
+picks the worst: OK < any Data Quality ID (higher = worse) < a
+per-parameter timeout < a transport read error. `status_text` names the
+vendor's own parameter names (Appendix A), e.g.
+`"DO Percent Saturation: RDO Cap expired"`, joined by `"; "`.
 
 ## 6. DB row layout (`db/database.py`)
 
@@ -356,7 +427,7 @@ at `GET /api/docs`.
 | `/api/data`                | DELETE | `delete_data`             | `api_request_timeout_seconds`        |
 | `/api/config`              | GET    | `get_config`              | `api_request_timeout_seconds`        |
 | `/api/config`              | PUT    | `put_config`              | `api_request_timeout_seconds`        |
-| `/api/scan`                | GET    | `scan_buses`              | `scan_probe_timeout_seconds` * number of RS485-to-usb serial devices configured. |
+| `/api/scan`                | GET    | `scan_buses`              | `hardware.manager.estimate_scan_duration_seconds(config)` — the scan's worst case (§4); the earlier `scan_probe_timeout_seconds * num converters` budget could never cover a real scan |
 
 `get_current_readings` calls `hardware.manager.query_all_sensors()`
 directly (no DB write). `scan_buses` calls
@@ -385,14 +456,51 @@ in-memory state during the scan it just ran).
 ## 9. Testing structure
 
 - `tests/mocks/mock_rdo_blue.py` implements `BlueRDOInterface` so unit
-  tests never touch real serial hardware; it's also injected into
-  `hardware.manager.SensorManager` for integration tests, satisfying
-  "integration tests for API calls using mocked Blue RDO sensors, but a
-  real SQLite DB and real network calls."
+  tests never touch real serial hardware. `hardware.manager.SensorManager`
+  takes an optional `sensor_factory: Callable[[ModbusBus, int],
+  BlueRDOInterface]` (default: construct a real `BlueRDOSensor`);
+  integration tests pass a factory returning pre-built
+  `MockBlueRDOSensor`s and populate the manager via
+  `save_sensor_mapping()` directly (never `start()`, which would open a
+  real serial connection), satisfying "integration tests for API calls
+  using mocked Blue RDO sensors, but a real SQLite DB and real network
+  calls."
 - Integration tests spin up the real aiohttp app via `pytest-aiohttp`'s
   `aiohttp_client` fixture, point `SMORES_DATA_DIR` at a pytest `tmp_path`,
-  and use a short `sample_interval_seconds` with `freezegun`/real sleeps
-  to assert row counts after a bounded runtime.
+  and use a short `sample_interval_seconds` with bounded real sleeps to
+  assert row counts after a bounded runtime (see the `freezegun` row in
+  §2 for why it isn't used for this).
+- `constants.SENSOR_UNREACHABLE_STATUS_CODE`/`_STATUS_TEXT` (added in step
+  8) are the `SensorReading.status_code`/`status_text` values
+  `hardware.manager.SensorManager.query_all_sensors` is expected to use
+  for a sensor whose `read_all()` raised `SensorTimeoutError` — needed so
+  tests have a concrete, agreed-upon value to assert against.
+- `hardware/modbus_bus.py` imports `pymodbus.client.AsyncModbusSerialClient`
+  at module scope, so `tests/unit/test_modbus_bus.py` monkeypatches
+  `hardware.modbus_bus.AsyncModbusSerialClient` with a fake client rather
+  than opening a real serial port. Those tests construct `ModbusBus` with
+  millisecond-scale `session_timeout_seconds`/`wakeup_settle_seconds`/
+  `session_keepalive_margin_seconds` (all three are constructor arguments
+  defaulting to the vendor-doc values in `rdo_blue_constants.py`) so the
+  wake-up path in §4 is covered without adding seconds of sleeping.
+- `tests/unit/test_manager.py` uses the same seam one level up: it
+  monkeypatches `hardware.manager.ModbusBus` with a scriptable `FakeBus`
+  (which addresses are "present", which ignore their first wake-up probe)
+  and injects `MockBlueRDOSensor`s through the manager's own
+  `sensor_factory`, covering the scan/mapping logic and the
+  exception-to-`-9999` translations the API-level integration tests don't
+  reach.
+
+### Step 9 note: `main.py` starts serving only *after* the startup scan
+
+`main.py` currently awaits the startup scan before building the aiohttp
+runner, so during a long startup scan there is no listener to return the
+"scan in progress" 503 that `SensorManager` is now able to raise, and the
+sampler task (still a step-10 stub) will need to tolerate `BusScanError`
+from `query_all_sensors()` for the same reason. Starting the site and the
+signal handlers *before* the startup scan, and running that scan as a
+cancellable task, belongs with step 10's `sampler.py` implementation rather
+than the hardware layer.
 
 ---
 

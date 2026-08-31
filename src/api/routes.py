@@ -36,7 +36,7 @@ from config.loader import get_config_path, save_config
 from config.schema import Config
 from constants import BusScanError, ConfigValidationError
 from db.database import Database
-from hardware.manager import SensorManager
+from hardware.manager import SensorManager, estimate_scan_duration_seconds
 from models.readings import SensorReading
 
 logger = logging.getLogger(__name__)
@@ -293,7 +293,10 @@ async def put_config(request: web.Request) -> web.Response:
         },
         504: {
             "schema": ErrorSchema,
-            "description": "Scan exceeded scan_probe_timeout_seconds * number of converters.",
+            "description": (
+                "Scan exceeded its worst-case duration "
+                "(hardware.manager.estimate_scan_duration_seconds)."
+            ),
         },
     },
 )
@@ -302,7 +305,7 @@ async def scan_buses(request: web.Request) -> web.Response:
     Modbus addresses via `hardware.manager.SensorManager.scan_all_buses()`,
     persist the resulting mapping to `config.json` (overwriting any
     existing `sensor_mapping`), and return it. Bounded by
-    `config.scan_probe_timeout_seconds * len(config.serial_port_devices)`.
+    `hardware.manager.estimate_scan_duration_seconds(config)`.
     """
     manager: SensorManager = request.app["manager"]
     config: Config = request.app["config"]
@@ -328,7 +331,8 @@ def register_routes(app: web.Application) -> None:
     """Add every route above to `app`, called once by `api.app.create_app`.
 
     `/api/sensors/current` and `/api/scan` get a per-route timeout override
-    (`poll_timeout_seconds`, `scan_probe_timeout_seconds * num converters`)
+    (`poll_timeout_seconds`, and the scan's worst-case duration from
+    `hardware.manager.estimate_scan_duration_seconds`)
     applied via a direct `with_timeout(...)` call against the live `Config`
     on `app`, rather than a `@with_timeout(...)` decorator above the `def` —
     the override value depends on the config loaded at process startup,
@@ -348,6 +352,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/config", get_config)
     app.router.add_put("/api/config", put_config)
 
-    num_converters = max(len(config.serial_port_devices), 1)
-    scan_timeout = config.scan_probe_timeout_seconds * num_converters
+    # A scan probes every address in [scan_min_address, scan_max_address] up to
+    # twice, and each absent address costs a full probe timeout, so the old
+    # `probe_timeout * num_converters` budget could never cover a real scan.
+    scan_timeout = estimate_scan_duration_seconds(config)
     app.router.add_get("/api/scan", with_timeout(scan_timeout)(scan_buses))

@@ -92,13 +92,62 @@ UNITS_TEXT: Final[dict[int, str]] = {
     177: "% sat",
 }
 
+PARAMETER_EXPECTED_UNITS_ID: Final[dict[int, int]] = {
+    TEMPERATURE_PARAMETER_REGISTER: 1,
+    DO_CONCENTRATION_MG_L_PARAMETER_REGISTER: 117,
+    DO_PERCENT_SATURATION_PARAMETER_REGISTER: 177,
+    DO_PARTIAL_PRESSURE_TORR_PARAMETER_REGISTER: 26,
+}
+"""Parameter starting register -> the Units ID this system assumes that
+parameter reports in (Appendix A's "Default Units" column). The Units ID
+register is R/W, so an instrument reconfigured via VuSitu could report e.g.
+Fahrenheit; `hardware.rdo_blue` reads the Units ID alongside every value and
+logs a warning on a mismatch rather than silently mis-labelling the reading.
+This system never *writes* the Units ID."""
+
+# --- Read shapes used by hardware.rdo_blue ---
+
+PARAMETER_READ_REGISTER_COUNT: Final[int] = PARAMETER_UNITS_ID_OFFSET + 1
+"""Registers fetched by one parameter read: the float32 value (offsets 0-1),
+the Data Quality ID (offset 2), and the Units ID (offset 3) in a single
+request. The remaining block registers (Parameter ID, sentinel) aren't used
+by this system, so they aren't fetched."""
+
+SERIAL_NUMBER_REGISTER_COUNT: Final[int] = 2
+DEVICE_ID_REGISTER_COUNT: Final[int] = 1
+
 # --- Session timing (doc: "Programming the PLC" step 3) ---
 
 END_OF_SESSION_TIMEOUT_SECONDS: Final[float] = 5.0
 """Default: the instrument re-enters a low-power/idle state if no Modbus
-command is received within this many seconds of the last one, per the doc.
-ASSUMED (implementation detail, not a register address): whether/how this
-system issues an explicit wake-up vs. relies on every read also acting as
-the "any Modbus command" wake-up the doc describes is decided at the
-hardware-layer implementation step (AGENTS.md step 9), not here.
-"""
+command is received within this many seconds of the last one, per the doc
+("may be longer if the instrument has been connected to VuSitu" — a longer
+real timeout only means we wake an already-awake instrument, which is
+harmless)."""
+
+SESSION_KEEPALIVE_MARGIN_SECONDS: Final[float] = 1.0
+"""ASSUMED (safety margin, not a documented value): treat an instrument's
+session as expired once `END_OF_SESSION_TIMEOUT_SECONDS - this` has elapsed
+since its last answered command, rather than racing the exact 5 s boundary.
+Patch this (or `END_OF_SESSION_TIMEOUT_SECONDS`) if instruments are seen
+timing out on the first read of a sampling cycle."""
+
+WAKEUP_SETTLE_SECONDS: Final[float] = 1.0
+"""Doc: "Allow one second before sending a second command. The instrument
+needs this time to wake up." Waited after the wake-up command and before the
+first real read of a new session.
+
+Resolves the wake-up question this file previously deferred to AGENTS.md
+step 9: `hardware.modbus_bus.ModbusBus` tracks the last answered command
+*per Modbus address* and, when that address's session has expired, sends one
+throwaway Device Id read as the doc's "any Modbus command" wake-up, waits
+this long, then issues the real request. The wake-up is not a retry (the
+real request is still sent exactly once); it is the documented way to reach
+an idle instrument, and without it every read at a sampling interval longer
+than `END_OF_SESSION_TIMEOUT_SECONDS` would fail."""
+
+
+def data_quality_text(code: int) -> str:
+    """Human-readable text for a Data Quality ID, falling back to a generic
+    message for the codes the vendor doc leaves unenumerated."""
+    return DATA_QUALITY_TEXT.get(code, f"Unknown data quality id {code}")

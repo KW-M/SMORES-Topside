@@ -8,7 +8,9 @@ validation. See ARCHITECTURE.md §3 for the field table and rationale.
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from constants import MODBUS_MAX_UNIT_ADDRESS, MODBUS_MIN_UNIT_ADDRESS
 
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
@@ -93,6 +95,23 @@ class Config(BaseModel):
             "RS485-to-USB serial converter."
         ),
     )
+    scan_min_address: int = Field(
+        default=MODBUS_MIN_UNIT_ADDRESS,
+        ge=MODBUS_MIN_UNIT_ADDRESS,
+        le=MODBUS_MAX_UNIT_ADDRESS,
+        description="Lowest Modbus address a bus scan probes (inclusive).",
+    )
+    scan_max_address: int = Field(
+        default=MODBUS_MAX_UNIT_ADDRESS,
+        ge=MODBUS_MIN_UNIT_ADDRESS,
+        le=MODBUS_MAX_UNIT_ADDRESS,
+        description=(
+            "Highest Modbus address a bus scan probes (inclusive). Defaults "
+            "to the whole legal RTU address space; narrow it to the highest "
+            "address actually installed to cut scan time, since every absent "
+            "address costs a full scan_probe_timeout_seconds."
+        ),
+    )
 
     api_host: str = Field(default="0.0.0.0", description="aiohttp bind address.")
     api_port: int = Field(
@@ -137,6 +156,15 @@ class Config(BaseModel):
         default="INFO",
         description="Passed to logging.basicConfig. One of: " + f"{sorted(_VALID_LOG_LEVELS)}",
     )
+
+    @model_validator(mode="after")
+    def _validate_scan_range(self) -> "Config":
+        if self.scan_min_address > self.scan_max_address:
+            raise ValueError(
+                f"scan_min_address ({self.scan_min_address}) must be <= "
+                f"scan_max_address ({self.scan_max_address})"
+            )
+        return self
 
     @field_validator("log_level")
     @classmethod
