@@ -84,7 +84,9 @@ deploy/
   smores-topside.service         systemd unit (§10): Type=exec, User=pi,
                                   SupplementaryGroups=dialout,
                                   Environment=SMORES_DATA_DIR=/home/pi/SMORES_Data,
-                                  Restart=always, StartLimitIntervalSec=0
+                                  Restart=always, StartLimitIntervalSec=0,
+                                  AmbientCapabilities=CAP_NET_BIND_SERVICE
+                                  (so api_port 80 works as user pi)
 
 documentation/
   RDO-Blue-Manual-Modbus-Interface.md   (existing vendor doc)
@@ -565,4 +567,5 @@ unit are here.
 | `StartLimitIntervalSec=0` | | Disables the default 5-starts-per-10s limit, which `PUT /api/config` (a legitimate, operator-driven restart) could otherwise trip, latching the unit into `failed`. |
 | `KillSignal=SIGTERM`, `TimeoutStopSec=30` | | SIGTERM is what §8's handler waits on; 30 s is well beyond what teardown (cancel tasks, close serial ports, close the DB) needs. §8 removes the handlers once teardown begins, so systemd's follow-up `SIGKILL` — or an impatient operator's second `systemctl stop` — is not swallowed. |
 | `SyslogIdentifier=smores-topside` | | Makes `journalctl -t smores-topside` work alongside `-u`. |
+| `AmbientCapabilities=CAP_NET_BIND_SERVICE`, `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` | | Lets `api_port` be a privileged port (< 1024, i.e. 80) while the process still runs as `pi`. systemd retains the capability across the switch to `pi` (it adds keep-caps to `SecureBits=` for ambient capabilities), and `NoNewPrivileges=` does not block it, since the capability is present at exec rather than gained through it. The bounding set is narrowed to the same single capability, so binding low ports is the only privilege the process can hold — nothing else about it is root-equivalent. Without these, a config asking for port 80 fails the `site.start()` bind in §8 with `PermissionError`, which `Restart=always` turns into a restart loop (README documents the recovery). |
 | `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `RestrictSUIDSGID` | | Cheap hardening that doesn't interfere with the workload. Deliberately **absent**: `PrivateDevices=`/`DeviceAllow=` (the service's entire job is opening USB serial adapters) and `ProtectHome=` (both the code and the data directory are under `/home/pi`). `ProtectSystem=strict` is not used either, since it would make `/run` read-only and put the journald socket at risk. |

@@ -172,6 +172,53 @@ you're in there: the default of 247 makes every startup scan take ~8 minutes
 (see [Bus scans take as long as the address range you give
 them](#bus-scans-take-as-long-as-the-address-range-you-give-them) above).
 
+### Serving on port 80
+
+The listen address and port come from the config file, not the unit:
+
+```json
+{ "api_host": "0.0.0.0", "api_port": 80 }
+```
+
+Ports below 1024 are privileged, and the service runs as `pi`, not root. The
+shipped unit covers this with
+
+```ini
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+```
+
+so `"api_port": 80` needs nothing beyond the config change — set it with
+`nano ~/SMORES_Data/config.json && sudo systemctl restart smores-topside`, or
+push it with `PUT /api/config` (which restarts the process itself). The API
+then answers on plain `http://<pi>/`, with the docs at
+`http://<pi>/api/docs`. Nothing else may already be listening on port 80 —
+check with `sudo ss -ltnp '( sport = :80 )'` first; on a Pi image with a web
+server installed, `sudo systemctl disable --now apache2` (or `nginx`,
+`lighttpd`) frees it.
+
+`AmbientCapabilities=` grants only the right to bind low ports, not root:
+systemd hands the capability across the switch to `pi`, and
+`CapabilityBoundingSet=` caps the process at that one capability for its
+whole lifetime. If you never serve below port 1024, both lines can be
+deleted.
+
+Two things to know if you go off this path:
+
+- **If the unit lacks the capability** (an older copy in
+  `/etc/systemd/system/`, or the lines removed) **and the config asks for port
+  80**, the bind fails with `Permission denied` at startup and `Restart=always`
+  retries it every 2 s indefinitely. `journalctl -u smores-topside -n 20`
+  shows the `PermissionError`. Fix it by re-copying the unit
+  (`sudo cp deploy/smores-topside.service /etc/systemd/system/ && sudo
+  systemctl daemon-reload`), or by editing `api_port` back to 8080 in
+  `~/SMORES_Data/config.json` — the API is unreachable in this state, so the
+  config has to be corrected on disk.
+- **Running it by hand** (`pipenv run python src/main.py`, no systemd) gets no
+  capability, so a config with `api_port` 80 fails the same way. For manual
+  runs either keep the port at 8080, or lower the privileged range once per
+  boot with `sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80`.
+
 ### Operate
 
 ```bash
@@ -216,7 +263,10 @@ For per-register Modbus traffic and per-address scan probes, set
 
 The backend binds `api_host`:`api_port`, `0.0.0.0:8080` by default — so
 `http://localhost:8080` on the Pi itself, or the Pi's LAN address from
-another machine. Examples below use `localhost`.
+another machine. Examples below use `localhost:8080`; adjust them if you
+changed the port. Port 80 (dropping the `:8080` from every URL below) is
+supported under the shipped systemd unit — see [Serving on port
+80](#serving-on-port-80).
 
 ### Live API documentation
 
@@ -403,7 +453,8 @@ tests/                  Unit and integration tests (mocked sensors + real SQLite
                           real SIGTERM)
 deploy/
   smores-topside.service  systemd unit (user pi, SMORES_DATA_DIR=/home/pi/SMORES_Data,
-                          Restart=always)
+                          Restart=always, CAP_NET_BIND_SERVICE so api_port
+                          can be 80)
 documentation/          Vendor docs (Blue RDO Modbus register map, etc.)
 Pipfile / Pipfile.lock  Dependency manifest (pipenv)
 pyproject.toml          ruff/mypy configuration

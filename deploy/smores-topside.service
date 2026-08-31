@@ -5,6 +5,10 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now smores-topside.service
 #
+# The listen address and port come from `api_host`/`api_port` in
+# ~/SMORES_Data/config.json, not from this unit; port 80 is permitted (see
+# AmbientCapabilities= below).
+#
 # ExecStart below points at this repo's pipenv virtualenv. The venv directory
 # name is derived deterministically from the project path, so it stays valid
 # across `pipenv install` re-runs as long as the repo lives at
@@ -62,6 +66,17 @@ TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=smores-topside
+
+# Allow binding privileged ports (< 1024) while still running as `pi`, so
+# setting `"api_port": 80` in config.json Just Works without running the
+# backend as root. systemd grants the capability across the drop to `pi` (it
+# adds keep-caps to SecureBits= automatically for ambient capabilities);
+# NoNewPrivileges= below does not interfere, since the capability is already
+# in place at exec rather than gained through it. The bounding set is narrowed
+# to the same single capability, so this is the only privilege the process can
+# ever hold. Remove both lines if you never serve below port 1024.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 # Light hardening. Note PrivateTmp= gives the service its own /tmp, so if you
 # ever re-point SMORES_DATA_DIR at a path under /tmp the service will silently
