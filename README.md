@@ -16,6 +16,222 @@ schema, and DB row layout.
 is implemented, the full test suite passes, `ruff`/`mypy --strict` are clean,
 and the systemd unit in [deploy/](deploy/) is documented below.
 
+## Initial setup of a fresh Raspberry Pi
+
+This is the whole path from a blank SD card to a Pi running the backend on
+boot, reachable both on the local wire and from anywhere. Do it in order; the
+later steps assume the user `pi`, a working network, and the repo cloned to
+`/home/pi/SMORES-Topside`.
+
+### 1. Flash the SD card with Raspberry Pi Imager
+
+Install [Raspberry Pi Imager](https://www.raspberrypi.com/software/) on your
+laptop, insert the SD card (16 GB or larger), and choose:
+
+- **Raspberry Pi Device:** Raspberry Pi 3
+- **Operating System:** Raspberry Pi OS (64-bit) — the Debian 13 "trixie"
+  build. The 64-bit image matters: this project targets 64-bit Debian and
+  Python 3.13.
+- **Storage:** your SD card
+
+Click **Next**, then **Edit Settings** when Imager offers to customise the OS,
+and fill in:
+
+| Tab | Setting | Value |
+| --- | --- | --- |
+| General | Set hostname | `smores-top` (anything, but it becomes `<hostname>.local` on the LAN) |
+| General | Set username and password | username **`pi`**, and a password you'll remember |
+| General | Set locale settings | your timezone and keyboard layout |
+| General | Configure wireless LAN | optional — this project uses Ethernet, so you can leave it off |
+| Services | Enable SSH | **Use password authentication** (or paste a public key if you'd rather log in by key only) |
+
+The username genuinely has to be `pi`. Raspberry Pi OS no longer creates a
+default user, and the systemd unit, the data directory
+(`/home/pi/SMORES_Data`), and the virtualenv path in
+[deploy/smores-topside.service](deploy/smores-topside.service) are all written
+against `/home/pi`.
+
+Write the image, put the card in the Pi, plug in Ethernet, then power it up.
+First boot takes a minute or two while the filesystem is resized.
+
+### 2. Connect Ethernet to an internet-facing network
+
+For setup, plug the Pi into a LAN that has a DHCP server and a route to the
+internet — a lab switch, an office jack, or a home router. The Pi needs
+internet access exactly once, to install Tailscale and this project's
+dependencies; after that it only needs to be reachable.
+
+From your laptop on the same network, log in by hostname (mDNS/avahi is
+running, so `.local` works without knowing the address):
+
+```bash
+ssh pi@smores-top.local
+```
+
+If `.local` doesn't resolve (common on corporate networks that block mDNS),
+find the address on your router's client list, or get it from the Pi's own
+console with `hostname -I`.
+
+Confirm the Pi can reach the internet and take the pending updates:
+
+```bash
+ping -c3 deb.debian.org
+sudo apt update && sudo apt full-upgrade -y
+sudo reboot
+```
+
+### 3. Serial console access from another computer
+
+Worth wiring up before you need it: a USB-to-TTL adapter gives you a login
+prompt even when the network is broken, the static IP is misconfigured, or the
+Pi doesn't finish booting. It's the one path that doesn't depend on anything
+this README changes.
+
+You need a **3.3 V** USB-to-serial adapter (CP2102, FT232R, PL2303 and similar
+all work). A 5 V adapter can damage the Pi's GPIO pins — check the jumper if
+yours has one.
+
+Wire three jumpers to the Pi's 40-pin header, with the Pi powered off:
+
+| Adapter pin | Pi header pin | Pi function |
+| --- | --- | --- |
+| GND | pin 6 | GND |
+| RX | pin 8 | GPIO14 / TXD |
+| TX | pin 10 | GPIO15 / RXD |
+
+TX and RX cross over — the adapter's receive line goes to the Pi's transmit
+pin. Leave the adapter's 5 V/3.3 V wire **disconnected**; the Pi runs from its
+own power supply, and back-feeding it through the header bypasses the
+protection circuitry.
+
+Then open the port on the other computer at **115200 baud, 8N1**:
+Note the specific device after `/dev/` is unique to your serial converter and can be found by typing `ls /dev/` with and without the serial adapter plugged in and looking for the new device.
+
+```bash
+# Linux
+screen /dev/ttyUSB0 115200          # or: picocom -b 115200 /dev/ttyUSB0
+
+# macOS
+screen /dev/cu.usbserial-0001 115200
+```
+
+On Windows, use PuTTY: connection type **Serial**, the adapter's `COMx` port,
+speed `115200`.
+
+Press Enter and you should get `smores-top login:`. (In `screen`, quit with
+Ctrl-A then K.)
+
+The serial console is enabled by default on current Raspberry Pi OS images —
+`/boot/firmware/cmdline.txt` contains `console=serial0,115200`. If yours
+doesn't, run `sudo raspi-config` → *Interface Options* → *Serial Port*, answer
+**Yes** to "login shell accessible over serial" and **Yes** to "serial port
+hardware enabled", and reboot.
+
+One thing to keep straight: the RS485-to-USB converters for the sensors also
+appear as `/dev/ttyUSB*`, and so does this adapter if you ever plug it into the
+Pi itself. That's why the config lists converters by
+`/dev/serial/by-id/...` — those names are stable per device and never collide.
+
+### 4. Remote access from anywhere with Tailscale
+
+Tailscale puts the Pi on a private WireGuard network, so you can SSH in from
+any of your own machines without port forwarding, a VPN concentrator, or a
+public IP. This is the practical way to reach a deployed Pi that lives behind
+someone else's router.
+
+Two walkthroughs, if you'd like to watch rather than read:
+
+- [Setting up a Raspberry Pi with Tailscale](https://youtu.be/dneNjDu4HKU?si=piz-58NNOsPLPFYX&t=954)
+  (starts at the Tailscale portion, 15:54)
+- [Tailscale in under 10 minutes](https://www.youtube.com/watch?v=sPdvyR7bLqI)
+
+On the Pi:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh   # adds Tailscale's apt repo and installs
+sudo systemctl enable --now tailscaled             # start now, and on every boot
+sudo tailscale up --ssh                            # log in, and enable Tailscale SSH
+```
+
+`enable --now` is what makes this survive a reboot — installing the package
+alone leaves the Pi off the tailnet after a power cycle.
+
+`tailscale up` prints a URL. Open it in a browser (on any machine — you can
+copy the URL out of the SSH session), sign in, and the Pi joins your tailnet.
+
+`--ssh` turns on **Tailscale SSH**: the tailnet handles authentication and key
+management, so you log in from another of your devices with no SSH keys or
+passwords to distribute:
+
+```bash
+tailscale ssh pi@smores-top      # from any device on the tailnet
+ssh pi@smores-top                # also works — Tailscale answers on port 22
+```
+
+If the node is already up and you forgot the flag, enable it after the fact
+with `sudo tailscale set --ssh`. Tailscale SSH also needs to be permitted by
+your tailnet's ACLs — the default "allow all" policy already does.
+
+Two settings worth changing in the [admin
+console](https://login.tailscale.com/admin/machines) while you're there:
+
+- **Disable key expiry** on this machine. Otherwise its node key expires (180
+  days by default) and the Pi silently drops off the tailnet — awkward for
+  something deployed in a hard-to-reach place.
+- Note its **tailnet name**. `tailscale status` shows it on the Pi; the full
+  DNS name looks like `smores-top.<your-tailnet>.ts.net`, and the API is
+  reachable there too:
+
+  ```bash
+  curl http://smores-top:8080/api/sensors/current      # short name, from the tailnet
+  ```
+
+### 5. Clone the repo and install dependencies
+
+```bash
+sudo apt install -y git pipenv
+git clone https://github.com/KW-M/SMORES-Topside.git /home/pi/SMORES-Topside
+cd /home/pi/SMORES-Topside
+pipenv install --dev
+```
+
+The path matters — see [Install dependencies](#install-dependencies) below for
+what this pulls in, and the systemd notes for why the unit expects the repo at
+`/home/pi/SMORES-Topside`. Check it runs by hand before making it a service:
+
+```bash
+pipenv run python src/main.py     # Ctrl-C to stop
+```
+
+### 6. Give the Pi a fixed IP
+
+So the API answers on a known address whether the Pi is on a real network or
+cabled straight to a laptop:
+
+```bash
+sudo deploy/setup_static_ip.sh
+sudo deploy/setup_static_ip.sh --status
+```
+
+This adds `192.168.1.55/24` to `eth0` *alongside* its DHCP address, rather
+than replacing it — full explanation, laptop-side configuration, and other
+options in [A fixed IP for the Pi](#a-fixed-ip-for-the-pi).
+
+### 7. Install the service so it starts on boot
+
+```bash
+sudo cp deploy/smores-topside.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now smores-topside.service
+systemctl status smores-topside.service
+```
+
+Then fill in your RS485 converters in `~/SMORES_Data/config.json` and restart
+— the config file is written with defaults on the first start, and lists no
+converters until you do. Full details, including the virtualenv path the unit
+hardcodes, serving on port 80, and reading the journal, are in [Running as a
+systemd service](#running-as-a-systemd-service).
+
 ## Prerequisites
 
 - Raspberry Pi OS / Debian 64-bit, Python 3.13 (`python3 --version`).
