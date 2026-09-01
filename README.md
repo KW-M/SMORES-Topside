@@ -259,6 +259,191 @@ journalctl -u smores-topside --since today > smores-today.log
 For per-register Modbus traffic and per-address scan probes, set
 `"log_level": "DEBUG"` in `config.json` and restart.
 
+## A fixed IP for the Pi
+
+The Pi has to be reachable in two quite different situations:
+
+- **Plugged into a real network** — a lab or building LAN with a router and a
+  DHCP server, which hands out whatever address it likes and will not honour
+  one we picked.
+- **Plugged into a laptop** — one Ethernet cable, no router, no DHCP server,
+  the other end configured by hand. Nothing will assign the Pi an address at
+  all, so without help it ends up with no usable IPv4 address and the API is
+  unreachable.
+
+The fix is to give `eth0` a second, fixed address **in addition to** the DHCP
+one rather than instead of it. An interface can hold as many IPv4 addresses as
+you like; they are not exclusive. `api_host` defaults to `0.0.0.0`, so the
+aiohttp server already accepts connections on every address the machine has —
+the DHCP one keeps working exactly as before, and `192.168.1.55` is there too
+whether or not a DHCP server ever answers.
+
+[deploy/setup_static_ip.sh](deploy/setup_static_ip.sh) sets this up:
+
+```bash
+sudo deploy/setup_static_ip.sh
+```
+
+That adds `192.168.1.55/24` to the NetworkManager profile that owns `eth0`,
+alongside its existing `ipv4.method=auto`. The change is written to the
+profile's keyfile in `/etc/NetworkManager/system-connections/`, so it survives
+reboots and cable swaps with no service or timer of its own. It's applied with
+`nmcli device reapply`, which merges the new address in without taking the
+link down — an SSH session over `eth0` stays up.
+
+A manual address on its own is *not* enough, though, and the script sets three
+more properties to stop NetworkManager taking it away again — see [Why the
+extra IPv6 and DHCP settings](#why-the-extra-ipv6-and-dhcp-settings) below.
+
+Other modes:
+
+```bash
+sudo deploy/setup_static_ip.sh --status                  # what's configured vs. live
+sudo deploy/setup_static_ip.sh --self-test               # prove it survives no DHCP
+sudo deploy/setup_static_ip.sh --remove                  # undo it
+sudo deploy/setup_static_ip.sh --address 10.10.0.55/24   # different address
+sudo deploy/setup_static_ip.sh --interface eth1          # different interface
+```
+
+`--status` exits non-zero if the static address isn't currently on the
+interface, so it works as a health check. Before making any change the script
+warns if the chosen address overlaps the subnet DHCP already gave you (two
+addresses on one network is never what you want here), and `arping`s to check
+no other host is already using it.
+
+### What each end of the cable needs
+
+On the Pi, nothing beyond the script. On the laptop, configure its Ethernet
+interface manually with an address in the *same* `/24` but not `.55` — e.g.
+`192.168.1.10`, netmask `255.255.255.0`. Leave the gateway and DNS blank; this
+link isn't a route to anywhere else. Then:
+
+```
+http://192.168.1.55:8080/api/docs
+```
+
+### Why the extra IPv6 and DHCP settings
+
+Adding a manual address is only half the job. NetworkManager tears down an
+entire activation — manual addresses included — when *every* address family
+fails to configure. On a cable with no DHCP server and no IPv6 router, both
+do: DHCPv4 times out, IPv6 SLAAC never sees a router advertisement, and the
+device lands in `ip-config-unavailable`. The Pi answers on `192.168.1.55` for
+about thirty seconds after plugging in and then silently goes dark:
+
+```
+dhcp4 (eth0): state changed no lease
+device (eth0): state change: ip-config -> failed (reason 'ip-config-unavailable')
+device (eth0): Activation: failed for connection 'Wired connection 1'
+avahi-daemon: Withdrawing address record for 192.168.1.55 on eth0.
+```
+
+Worse, NetworkManager then gives up after four autoconnect attempts, so the
+Pi stays unreachable until somebody unplugs and re-seats the cable. Three more
+properties close that off, and the script sets all three:
+
+| Property | Value | Why |
+| --- | --- | --- |
+| `ipv6.method` | `link-local` | Gives one address family that cannot fail. `fe80::` is derived from the interface itself — no router, no server, no timeout — so the activation always succeeds and the IPv4 addresses stay put. |
+| `ipv4.dhcp-timeout` | `infinity` | IPv4 never enters the failed state at all; DHCP just keeps asking in the background. Also means moving the Pi from a bare cable onto a real network picks up a lease on its own, with no re-plug. |
+| `connection.autoconnect-retries` | `0` (forever) | Last line of defence. If activation ever does fail, keep retrying instead of giving up and leaving the Pi dark. |
+
+The cost of `ipv6.method=link-local` is that `eth0` no longer gets a global
+IPv6 address on networks that offer one. For an IPv4-only sensor appliance
+that is a good trade, but `--ipv6 auto` puts it back if you need it — the
+script warns, because that reopens the failure above.
+
+### Verify it without unplugging anything
+
+A dummy interface behaves exactly like a cable with nothing on the far end:
+NetworkManager runs the same IP configuration over it, DHCP requests go
+nowhere, and no router advertisements ever arrive. `--self-test` uses one to
+reproduce the failure and confirm the fix, without touching `eth0`:
+
+```bash
+sudo deploy/setup_static_ip.sh --self-test
+```
+
+It runs two ~30 s cases on a throwaway `smoresprobe0` device — the old
+settings, which should lose the address, and the ones the script applies,
+which should hold it — and deletes the device afterwards either way. If the
+first case *doesn't* fail, it says so rather than claiming a pass, since then
+the model isn't faithful and only the real cable can settle it.
+
+On the real hardware:
+
+```bash
+# Pi cabled directly to the laptop, nothing else plugged in:
+deploy/setup_static_ip.sh --status                 # on the Pi
+curl -s http://192.168.1.55:8080/api/data | head   # from the laptop
+```
+
+Leave it connected for a few minutes before calling it good — the original bug
+took about thirty seconds to bite, and a link that works immediately after
+plug-in can still drop later.
+
+### Alternatives, and why not
+
+- **Static address only, no DHCP** (`ipv4.method=manual`). Simple and always
+  predictable, but the Pi then can't get onto a building LAN at all without
+  being reconfigured by hand for each one. Dual addressing costs nothing and
+  keeps both.
+- **`smores-top.local` over mDNS.** `avahi-daemon` is already running on this
+  Pi, so `http://smores-top.local:8080` resolves on both kinds of network with
+  no configuration at all, and it keeps working if the fixed address ever has
+  to change. Good as a *complement* — but it needs a working mDNS resolver at
+  the other end (fine on macOS and modern Linux/Windows, absent on plenty of
+  embedded clients and some corporate images) and it can't be typed into
+  something that only accepts an IP. It is also *not* a fallback for the
+  failure above: avahi advertises whatever addresses the interface has, so
+  when the activation collapsed it withdrew `192.168.1.55` and `.local`
+  stopped resolving at the same moment. Use the fixed address as the
+  guarantee and `.local` as the convenience.
+- **IPv4 link-local (169.254.x.y).** Both ends self-assign with no
+  configuration, which handles the direct-cable case — but the address is
+  picked at random each time, so you're back to not knowing where the Pi is.
+  NetworkManager can add one alongside everything else if you want it as a
+  last resort: `sudo nmcli connection modify "Wired connection 1"
+  ipv4.link-local enabled`.
+- **Tailscale.** Already installed here, and its `100.x` address is stable
+  across networks — but it needs the Pi to have working internet, which is
+  exactly what the direct-cable case lacks. Useful for remote access, not a
+  substitute for this.
+- **A DHCP reservation on the router.** Gives a predictable address on one
+  specific network, needs admin access to that router, and does nothing on the
+  next network or on a bare cable.
+- **A NetworkManager dispatcher hook** that re-adds the address by hand after
+  every interface event. This is the brute-force backstop if the profile
+  settings above ever stop holding on some future NetworkManager version — it
+  papers over the teardown instead of preventing it, so reach for it only
+  after `--self-test` says something is wrong:
+
+  ```bash
+  sudo tee /etc/NetworkManager/dispatcher.d/50-smores-static-ip >/dev/null <<'EOF'
+  #!/bin/sh
+  [ "$1" = "eth0" ] || exit 0
+  case "$2" in up|dhcp4-change) ip addr add 192.168.1.55/24 dev eth0 2>/dev/null || true ;; esac
+  EOF
+  sudo chmod 755 /etc/NetworkManager/dispatcher.d/50-smores-static-ip
+  ```
+
+### Not running NetworkManager?
+
+The script only handles NetworkManager (it checks, and refuses otherwise).
+`nmcli device status` confirms which stack is in charge. On a Pi image using
+`dhcpcd` instead, the equivalent goes in `/etc/dhcpcd.conf`:
+
+```
+interface eth0
+static ip_address=192.168.1.55/24
+```
+
+...which on `dhcpcd` *replaces* DHCP rather than supplementing it; use
+`profile static_eth0` / `fallback static_eth0` to get the fallback behaviour
+instead. On `systemd-networkd`, a `.network` file with both `DHCP=yes` and an
+`[Address]` section gives the same dual-address result as the NetworkManager
+setup above.
+
 ## Using the API
 
 The backend binds `api_host`:`api_port`, `0.0.0.0:8080` by default — so
@@ -266,7 +451,8 @@ The backend binds `api_host`:`api_port`, `0.0.0.0:8080` by default — so
 another machine. Examples below use `localhost:8080`; adjust them if you
 changed the port. Port 80 (dropping the `:8080` from every URL below) is
 supported under the shipped systemd unit — see [Serving on port
-80](#serving-on-port-80).
+80](#serving-on-port-80). For a LAN address that doesn't move, see [A fixed IP
+for the Pi](#a-fixed-ip-for-the-pi).
 
 ### Live API documentation
 
@@ -455,6 +641,9 @@ deploy/
   smores-topside.service  systemd unit (user pi, SMORES_DATA_DIR=/home/pi/SMORES_Data,
                           Restart=always, CAP_NET_BIND_SERVICE so api_port
                           can be 80)
+  setup_static_ip.sh      Adds a persistent static IPv4 address to eth0
+                          alongside DHCP, so the API is reachable at a known
+                          address on a LAN and on a bare cable alike
 documentation/          Vendor docs (Blue RDO Modbus register map, etc.)
 Pipfile / Pipfile.lock  Dependency manifest (pipenv)
 pyproject.toml          ruff/mypy configuration
